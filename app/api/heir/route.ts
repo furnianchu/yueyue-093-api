@@ -1,6 +1,21 @@
-import { sql } from '@vercel/postgres';
+import { VercelPool } from '@vercel/postgres';
 import { NextRequest, NextResponse } from 'next/server';
-if (!process.env.POSTGRES_URL && process.env.DATABASE_URL) { process.env.POSTGRES_URL = process.env.DATABASE_URL; }
+
+// Neon 原生集成注入 DATABASE_URL（@vercel/postgres 的 createPool() 默认只认
+// POSTGRES_URL，且强制要求连接串含 "-pooler."，direct 串会抛 invalid_connection_string）。
+// 直接构造 VercelPool 可绕开这两个 create* 的校验：它的 .sql 走 neon() HTTP，
+// pooled / direct 串都能用。按优先级挑一个，本地都没有就留 null，让 catch 回显。
+const CS = process.env.DATABASE_URL
+  || process.env.POSTGRES_URL
+  || process.env.POSTGRES_URL_NON_POOLING
+  || '';
+const pool = CS ? new VercelPool({ connectionString: CS }) : null;
+
+// 保持下面 4 处 sql`...` 模板写法不变，只把底层从懒加载 Proxy 换成显式 pool
+function sql(strings: TemplateStringsArray, ...values: (string | number | boolean | undefined | null)[]) {
+  if (!pool) throw new Error('no_database_connection_string');
+  return pool.sql(strings, ...values);
+}
 
 const ALLOW = new Set([
   'https://yueyuezidaidaixue.de5.net',
@@ -46,8 +61,11 @@ export async function POST(req: NextRequest) {
       { headers: { ...cors(origin), 'Cache-Control': 'no-store' } }
     );
   } catch (e) {
-    // 打点失败不能影响前端彩蛋
-    return NextResponse.json({ ok: false }, { status: 200, headers: cors(origin) });
+    // 打点失败不能影响前端彩蛋；回显错误码便于定位（不含连接串值）
+    return NextResponse.json(
+      { ok: false, err: (e instanceof Error ? e.message : String(e)).slice(0, 200) },
+      { status: 200, headers: cors(origin) }
+    );
   }
 }
 
@@ -61,7 +79,10 @@ export async function GET(req: NextRequest) {
       { rows, cycles: 33_550_336 },
       { headers: { ...cors(origin), 'Cache-Control': 'no-store' } }
     );
-  } catch {
-    return NextResponse.json({ rows: [] }, { headers: cors(origin) });
+  } catch (e) {
+    return NextResponse.json(
+      { rows: [], err: (e instanceof Error ? e.message : String(e)).slice(0, 200) },
+      { headers: cors(origin) }
+    );
   }
 }
